@@ -161,41 +161,70 @@ colorize() {
     return
   fi
 
+  # Tags stay coloured but the message body remains plain so that colour draws
+  # the eye to the category only.  This keeps informational noise subtle while
+  # still surfacing urgent situations via their tag.
+
   # Categorise log lines using keywords so we can attach tags such as
-  # [ERROR], [WARN], [DENIED], etc.  Matching is done in lowercase to keep the
-  # checks case-insensitive.
+  # [ERROR], [WARN], etc.  Matching is done in lowercase to keep the checks
+  # case-insensitive and a simple set of heuristics avoids over-classifying
+  # incidental commands as queries.
   local lower
   lower=$(printf "%s" "$msg" | tr '[:upper:]' '[:lower:]')
+
   local tag="[INFO]"
-  local color="$INFO_COLOR"
+  local tag_color="$INFO_COLOR"
+  local full_line_color=""
 
   if [[ "$lower" == *"denied"* || "$lower" == *"permission denied"* || "$lower" == *"avc: denied"* ]]; then
     tag="[DENIED]"
-    color="$DENIED_COLOR"
+    tag_color="$DENIED_COLOR"
   elif [[ "$lower" == *"error"* || "$lower" == *"fail"* || "$lower" == *"fatal"* || "$lower" == *"panic"* || "$lower" == *"critical"* ]]; then
     tag="[ERROR]"
-    color="$ERROR_COLOR"
+    tag_color="$ERROR_COLOR"
+    full_line_color="$ERROR_COLOR"
   elif [[ "$lower" == *"warning"* || "$lower" == *"caution"* || "$lower" == *"deprecated"* || "$lower" == *"skipping"* ]]; then
     tag="[WARN]"
-    color="$WARNING_COLOR"
+    tag_color="$WARNING_COLOR"
   elif [[ "$lower" == *"success"* || "$lower" == *"completed"* || "$lower" == *"passed"* || "$lower" == *" ok"* || "$lower" == "ok" ]]; then
     tag="[OK]"
-    color="$SUCCESS_COLOR"
-  elif [[ "$lower" == *"grep"* || "$lower" == *"search"* || "$lower" == *"lookup"* || "$lower" == *"find"* || "$lower" == *"awk"* || "$lower" == *"sed"* ]]; then
-    tag="[QUERY]"
-    color="$QUERY_COLOR"
-  elif [[ "$lower" == *"timeout"* || "$lower" == *"retry"* || "$lower" == *"connection refused"* || "$lower" == *"waiting"* ]]; then
-    tag="[RETRY]"
-    color="$RETRY_COLOR"
-  fi
-
-  local line="${tag} ${msg}"
-
-  if [ -n "$DISABLE_COLOR" ] || [ -z "$color" ]; then
-    printf "%s" "$line"
+    tag_color="$SUCCESS_COLOR"
   else
-    printf "%s%s%s" "$color" "$line" "$RESET"
+    local query_context=""
+    if [[ "$lower" == *"search"* || "$lower" == *"searching"* || "$lower" == *"lookup"* || "$lower" == *"look up"* || "$lower" == *"find"* || "$lower" == *"filter"* || "$lower" == *"filtering"* ]]; then
+      query_context=1
+    fi
+    if [[ "$lower" =~ (^|[^[:alpha:]])grep([^[:alpha:]]|$) ]]; then
+      if [[ "$lower" != *"error"* && "$lower" != *"fail"* && "$lower" != *"denied"* && "$lower" != *"warning"* && "$lower" != *"critical"* && "$lower" != *"panic"* ]]; then
+        query_context=1
+      fi
+    fi
+    if [ -n "$query_context" ]; then
+      tag="[QUERY]"
+      tag_color="$QUERY_COLOR"
+    elif [[ "$lower" == *"timeout"* || "$lower" == *"retry"* || "$lower" == *"connection refused"* || "$lower" == *"waiting"* ]]; then
+      tag="[RETRY]"
+      tag_color="$RETRY_COLOR"
+    fi
   fi
+
+  local plain_line="${tag} ${msg}"
+
+  if [ -n "$DISABLE_COLOR" ]; then
+    printf "%s" "$plain_line"
+    return
+  fi
+
+  if [ -n "$full_line_color" ]; then
+    printf "%s%s%s" "$full_line_color" "$plain_line" "$RESET"
+    return
+  fi
+
+  local coloured_tag="$tag"
+  if [ -n "$tag_color" ]; then
+    coloured_tag="${tag_color}${tag}${RESET}"
+  fi
+  printf "%s %s" "$coloured_tag" "$msg"
 }
 
 log_tee() {
@@ -216,6 +245,8 @@ log_tee() {
 
     local decorated
     local color="$HEADER_COLOR"
+    # Top-level sections use a heavier divider than deeper subsections so they
+    # stand out when scanning the report.
     if (( level <= 2 )); then
       decorated="=== ${heading} ==="
     else
@@ -265,6 +296,40 @@ bytesToHumanReadable() {
         s=$((s + 1))
     done
     echo "$i$d ${S[$s]}"
+}
+
+# Render disk usage files as a concise table so storage issues are easy to spot.
+# Raw df(1) numbers are converted to human readable units while we preserve the
+# original column order (filesystem, used, available, usage percent, mount).
+log_disk_table() {
+  local df_file="$1"
+
+  if [ ! -f "$df_file" ]; then
+    log "warning: missing disk usage data at $df_file"
+    return
+  fi
+
+  log "Filesystem | Used | Available | Used% | Mounted on"
+  log "---------- | ---- | --------- | ----- | ----------"
+
+  awk 'NR>1 {
+    used=$3 * 1024
+    avail=$4 * 1024
+    mount=$6
+    if (NF > 6) {
+      for (i = 7; i <= NF; ++i) {
+        mount = mount " " $i
+      }
+    }
+    printf "%s\t%.0f\t%.0f\t%s\t%s\n", $1, used, avail, $5, mount
+  }' "$df_file" |
+  while IFS=$'\t' read -r filesystem used_bytes avail_bytes used_pct mountpoint; do
+    local used_hr
+    local avail_hr
+    used_hr=$(bytesToHumanReadable "${used_bytes:-0}")
+    avail_hr=$(bytesToHumanReadable "${avail_bytes:-0}")
+    log "$(printf "%s | %s | %s | %s | %s" "$filesystem" "$used_hr" "$avail_hr" "$used_pct" "$mountpoint")"
+  done
 }
 
 report()
@@ -552,10 +617,8 @@ report()
   log_tee "## Disk"
   log
 
-  log "// full disk info"
-  log "cat $base_dir/df"
-  log "---"
-  log_cmd "cat $base_dir/df"
+  log "// disk usage summary"
+  log_disk_table "$base_dir/df"
   log "---"
   log
 
