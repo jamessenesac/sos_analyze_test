@@ -100,9 +100,6 @@ render_tagged_line() {
   local text="$2"
   local critical="${3:-0}"
 
-  local colored_tag
-  colored_tag=$(wrap_tag "$tag")
-
   local message="$text"
 
   if [ "$critical" -eq 1 ] && [ "$ENABLE_COLOR" -eq 1 ]; then
@@ -119,11 +116,50 @@ render_tagged_line() {
     fi
   fi
 
+  if [ -z "$tag" ]; then
+    printf "%s" "$message"
+    return
+  fi
+
+  local colored_tag
+  colored_tag=$(wrap_tag "$tag")
+
   if [ -n "$message" ]; then
     printf "%s %s" "$colored_tag" "$message"
   else
     printf "%s" "$colored_tag"
   fi
+}
+
+classify_text_line() {
+  local text="$1"
+
+  if [ -z "$text" ]; then
+    printf ":0"
+    return
+  fi
+
+  if [[ "$text" =~ ^[[:space:]]*File\  ]]; then
+    printf "ERROR:1"
+    return
+  fi
+
+  if printf "%s" "$text" | grep -Eiq '(traceback \(most recent call last\)|\b(error|exception|keyerror|failed|failure|fatal|panic)\b|no space left|permission denied)'; then
+    printf "ERROR:1"
+    return
+  fi
+
+  if printf "%s" "$text" | grep -Eiq '\bwarning\b|\bwarn\b'; then
+    printf "WARN:0"
+    return
+  fi
+
+  if printf "%s" "$text" | grep -Eiq '\bdenied\b'; then
+    printf "DENIED:0"
+    return
+  fi
+
+  printf ":0"
 }
 
 print_line() {
@@ -187,7 +223,7 @@ emit_label_line() {
   local colored_label="$label_text"
 
   if [ "$ENABLE_COLOR" -eq 1 ]; then
-    colored_label="${BOLD_CYAN}${label_text}${RESET}"
+    colored_label="${BOLD_BLUE}${label_text}${RESET}"
   fi
 
   local line="// ${colored_label}"
@@ -441,28 +477,27 @@ emit_selinux_status() {
 highlight_permissive_flag() {
   local text="$1"
   local flag="$2"
-  local reapply="$3"
+  local color="$3"
+
+  if [ "$ENABLE_COLOR" -eq 0 ] || [ -z "$color" ]; then
+    printf "%s" "$text"
+    return
+  fi
+
+  local escaped_flag
+  escaped_flag=$(printf '%s' "$flag" | sed -e 's/[.[\*^$(){}+?|\\/]/\\&/g')
+  printf "%s" "$(printf "%s" "$text" | sed -E "s|($escaped_flag)|${color}\\1${RESET}|g")"
+}
+
+highlight_denied_keyword() {
+  local text="$1"
 
   if [ "$ENABLE_COLOR" -eq 0 ]; then
     printf "%s" "$text"
     return
   fi
 
-  local replacement
-  case "$flag" in
-    permissive=0)
-      replacement="${BOLD}${flag}${RESET}${reapply}"
-      ;;
-    permissive=1)
-      replacement="${YELLOW}${flag}${RESET}"
-      ;;
-    *)
-      printf "%s" "$text"
-      return
-      ;;
-  esac
-
-  printf "%s" "${text//$flag/$replacement}"
+  printf "%s" "$(printf "%s" "$text" | sed -E "s|(denied)|${BRIGHT_RED}\\1${RESET}|Ig")"
 }
 
 process_selinux_config() {
@@ -518,21 +553,19 @@ process_selinux_denials() {
 
     local processed="$entry"
 
+    if [ "$ENABLE_COLOR" -eq 1 ]; then
+      processed=$(highlight_denied_keyword "$processed")
+      processed=$(highlight_permissive_flag "$processed" "permissive=0" "$BRIGHT_RED")
+      processed=$(highlight_permissive_flag "$processed" "permissive=1" "$YELLOW")
+    fi
+
     if [[ "$entry" == *"permissive=0"* ]]; then
       SELINUX_DENIAL_ENFORCING=$((SELINUX_DENIAL_ENFORCING + 1))
-      if [ "$ENABLE_COLOR" -eq 1 ]; then
-        processed=$(highlight_permissive_flag "$processed" "permissive=0" "$(color_for_tag DENIED)")
-      fi
-      emit_tagged_line "DENIED" "$processed" 1 0
     elif [[ "$entry" == *"permissive=1"* ]]; then
       SELINUX_DENIAL_PERMISSIVE=$((SELINUX_DENIAL_PERMISSIVE + 1))
-      if [ "$ENABLE_COLOR" -eq 1 ]; then
-        processed=$(highlight_permissive_flag "$processed" "permissive=1" "")
-      fi
-      emit_tagged_line "DENIED" "$processed" 0 0
-    else
-      emit_tagged_line "DENIED" "$processed" 1 0
     fi
+
+    emit_tagged_line "DENIED" "$processed" 0 0
   done < "$tmpfile"
 
   rm -f "$tmpfile"
@@ -727,30 +760,89 @@ render_user_memory_totals() {
     return
   fi
 
-  local header
-  header=$(print_table_row "%-12s %15s" "USER" "SUM_RSS(MiB)")
-  emit_tagged_line "INFO" "$header" 0 0
-
-  local separator
-  separator=$(print_table_row "%-12s %15s" "------------" "---------------")
-  emit_tagged_line "INFO" "$separator" 0 0
-
   local tmpfile
   tmpfile=$(mktemp)
   awk 'NR>1 {rss[$1]+=$6} END {for (user in rss) printf "%s\t%s\n", user, rss[user]}' "$ps_path" | sort -k2 -nr > "$tmpfile"
+
+  local -a users=()
+  local -a rss_values=()
+  local total_rss=0
 
   while IFS=$'\t' read -r user rss || [ -n "$user" ]; do
     if [ -z "$user" ]; then
       continue
     fi
-    local rss_fmt
-    rss_fmt=$(to_mib "$rss")
-    local row
-    row=$(print_table_row "%-12s %15.1f" "$user" "$rss_fmt")
-    emit_tagged_line "INFO" "$row" 0 0
+    users+=("$user")
+    rss_values+=("$rss")
+    if [ -n "$rss" ]; then
+      total_rss=$((total_rss + rss))
+    fi
   done < "$tmpfile"
 
   rm -f "$tmpfile"
+
+  if [ ${#users[@]} -eq 0 ]; then
+    emit_tagged_line "" "No per-user memory consumption data available." 0 0
+    return
+  fi
+
+  local header
+  header=$(print_table_row "%-4s %-16s %12s %10s" "#" "USER" "RSS(MiB)" "% of total")
+  emit_tagged_line "" "$header" 0 0
+
+  local separator
+  separator=$(print_table_row "%-4s %-16s %12s %10s" "----" "----------------" "------------" "----------")
+  emit_tagged_line "" "$separator" 0 0
+
+  local idx=0
+  for idx in "${!users[@]}"; do
+    local rank=$((idx + 1))
+    local user="${users[$idx]}"
+    local rss="${rss_values[$idx]}"
+    local rss_fmt
+    rss_fmt=$(to_mib "$rss")
+    local percent="0.0"
+    if [ "$total_rss" -gt 0 ]; then
+      percent=$(awk -v r="$rss" -v t="$total_rss" 'BEGIN { if (t > 0) printf "%.1f", (r/t)*100; else printf "0.0" }')
+    fi
+    local percent_display
+    percent_display=$(printf "%s%%" "$percent")
+    local row
+    row=$(print_table_row "%-4s %-16s %12.1f %10s" "$rank" "$user" "$rss_fmt" "$percent_display")
+    emit_tagged_line "" "$row" 0 0
+  done
+
+  local total_mib
+  total_mib=$(to_mib "$total_rss")
+  local total_row
+  total_row=$(print_table_row "%-4s %-16s %12.1f %10s" "" "Total" "$total_mib" "100.0%")
+  emit_tagged_line "" "$total_row" 0 0
+}
+
+emit_memory_usage_summary() {
+  local total_kib="$1"
+
+  if [ -z "$total_kib" ]; then
+    return
+  fi
+
+  local readable_total
+  readable_total=$(format_size_value "$total_kib")
+
+  local gib_value
+  gib_value=$(awk -v val="$total_kib" 'BEGIN { printf "%.2f", val/1048576 }')
+
+  local summary_line
+  summary_line=$(print_table_row "%-32s %15s" "Total memory consumed" "$readable_total")
+  emit_tagged_line "" "$summary_line" 0 0
+
+  local gib_line
+  gib_line=$(print_table_row "%-32s %15s" "Total memory consumed (GiB)" "$gib_value")
+  emit_tagged_line "" "$gib_line" 0 0
+
+  local kib_line
+  kib_line=$(print_table_row "%-32s %15s" "Total memory consumed (KiB)" "$total_kib")
+  emit_tagged_line "" "$kib_line" 0 0
 }
 
 log_tee() {
@@ -821,7 +913,12 @@ log() {
     return
   fi
 
-  emit_tagged_line "INFO" "$msg" 0 0
+  local classification
+  classification=$(classify_text_line "$msg")
+  local log_tag=""
+  local log_critical=0
+  IFS=: read -r log_tag log_critical <<< "$classification"
+  emit_tagged_line "$log_tag" "$msg" "${log_critical:-0}" 0
 }
 
 log_cmd() {
@@ -873,7 +970,12 @@ log_cmd() {
   local status=$?
 
   while IFS= read -r line || [ -n "$line" ]; do
-    emit_tagged_line "INFO" "$line" 0 0
+    local classification
+    classification=$(classify_text_line "$line")
+    local line_tag=""
+    local line_critical=0
+    IFS=: read -r line_tag line_critical <<< "$classification"
+    emit_tagged_line "$line_tag" "$line" "${line_critical:-0}" 0
   done <<< "$cmd_output"
 
   if [ $status -ne 0 ]; then
@@ -1228,10 +1330,7 @@ report()
   log_cmd "cat $base_dir/ps | sort -nr | awk '{print \$1, \$6}' | $GREP -v ^USER | $GREP -v ^COMMAND | $GREP -v \"^ $\" | awk  '{a[\$1] += \$2} END{for (i in a) print i, a[i]}' | sort -nrk2"
   log
   memory_usage=$(cat $base_dir/ps | sort -nr | awk '{print $6}' | grep -v ^-$ | $GREP -v ^RSS | $GREP -v ^$ | paste -s -d+ | bc)
-  memory_usage_gb=$(echo "scale=2;$memory_usage/1024/1024" | bc)
-  log "Total Memory Consumed in KiB: $memory_usage"
-  log "Total Memory Consumed in GiB: $memory_usage_gb"
-  log "---"
+  emit_memory_usage_summary "$memory_usage"
   log
 
   log "// Postgres idle process (candlepin)"
