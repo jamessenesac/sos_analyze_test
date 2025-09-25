@@ -164,25 +164,40 @@ colorize() {
   # Tags stay coloured but the message body remains plain so that colour draws
   # the eye to the category only.  This keeps informational noise subtle while
   # still surfacing urgent situations via their tag.
-
   # Categorise log lines using keywords so we can attach tags such as
   # [ERROR], [WARN], etc.  Matching is done in lowercase to keep the checks
-  # case-insensitive and a simple set of heuristics avoids over-classifying
-  # incidental commands as queries.
+  # case-insensitive.  Additional heuristics emphasise SELinux denials and keep
+  # incidental parsing commands from being mislabelled as queries.
   local lower
   lower=$(printf "%s" "$msg" | tr '[:upper:]' '[:lower:]')
 
   local tag="[INFO]"
   local tag_color="$INFO_COLOR"
-  local full_line_color=""
+  local highlight_strict_denial=""
 
-  if [[ "$lower" == *"denied"* || "$lower" == *"permission denied"* || "$lower" == *"avc: denied"* ]]; then
+  if [[ "$msg" == SELINUX\ STATUS:* ]]; then
+    if [[ "$lower" == *"enforcing"* ]]; then
+      tag="[WARN]"
+      tag_color="$WARNING_COLOR"
+    elif [[ "$lower" == *"disabled"* ]]; then
+      tag="[OK]"
+      tag_color="$SUCCESS_COLOR"
+    else
+      tag="[INFO]"
+      tag_color="$INFO_COLOR"
+    fi
+  elif [[ "$lower" == *"permissive=0"* ]]; then
+    # Audit messages with permissive=0 occurred while SELinux was enforcing;
+    # treat them as stricter denials so they immediately stand out.
+    tag="[DENIED!]"
+    tag_color="$ERROR_COLOR"
+    highlight_strict_denial=1
+  elif [[ "$lower" == *"denied"* || "$lower" == *"permission denied"* || "$lower" == *"avc: denied"* ]]; then
     tag="[DENIED]"
     tag_color="$DENIED_COLOR"
   elif [[ "$lower" == *"error"* || "$lower" == *"fail"* || "$lower" == *"fatal"* || "$lower" == *"panic"* || "$lower" == *"critical"* ]]; then
     tag="[ERROR]"
     tag_color="$ERROR_COLOR"
-    full_line_color="$ERROR_COLOR"
   elif [[ "$lower" == *"warning"* || "$lower" == *"caution"* || "$lower" == *"deprecated"* || "$lower" == *"skipping"* ]]; then
     tag="[WARN]"
     tag_color="$WARNING_COLOR"
@@ -191,11 +206,12 @@ colorize() {
     tag_color="$SUCCESS_COLOR"
   else
     local query_context=""
-    if [[ "$lower" == *"search"* || "$lower" == *"searching"* || "$lower" == *"lookup"* || "$lower" == *"look up"* || "$lower" == *"find"* || "$lower" == *"filter"* || "$lower" == *"filtering"* ]]; then
-      query_context=1
-    fi
-    if [[ "$lower" =~ (^|[^[:alpha:]])grep([^[:alpha:]]|$) ]]; then
-      if [[ "$lower" != *"error"* && "$lower" != *"fail"* && "$lower" != *"denied"* && "$lower" != *"warning"* && "$lower" != *"critical"* && "$lower" != *"panic"* ]]; then
+    if [[ "$lower" == *"query"* || "$lower" == *"queries"* || "$lower" == *"search"* || "$lower" == *"lookup"* || "$lower" == *"look up"* ]]; then
+      # Only mark log lines as queries when the surrounding text describes an
+      # intentional lookup (typically via comments such as "// search").  This
+      # prevents routine processing commands (grep, cat, etc.) from being
+      # tagged as queries when they are merely part of parsing pipelines.
+      if [[ "$msg" == //* || "$msg" == \#* || "$lower" == *"query:"* || "$lower" == *"queries"* ]]; then
         query_context=1
       fi
     fi
@@ -215,14 +231,15 @@ colorize() {
     return
   fi
 
-  if [ -n "$full_line_color" ]; then
-    printf "%s%s%s" "$full_line_color" "$plain_line" "$RESET"
-    return
-  fi
-
   local coloured_tag="$tag"
   if [ -n "$tag_color" ]; then
     coloured_tag="${tag_color}${tag}${RESET}"
+  fi
+
+  if [ -n "$highlight_strict_denial" ] && [ -n "$DENIED_COLOR" ]; then
+    # Strict denials retain a plain command body so the executable path stays
+    # readable, but the tag itself is escalated via the denial palette.
+    coloured_tag="${DENIED_COLOR}${tag}${RESET}"
   fi
   printf "%s %s" "$coloured_tag" "$msg"
 }
@@ -298,6 +315,26 @@ bytesToHumanReadable() {
     echo "$i$d ${S[$s]}"
 }
 
+# Truncate string fields so tabular output retains fixed widths even when
+# paths, mount points or command names are excessively long.
+truncate_field() {
+  local value="$1"
+  local width="$2"
+  local ellipsis="${3:-…}"
+
+  if [ -z "$width" ] || [ "$width" -le 0 ]; then
+    printf "%s" "$value"
+    return
+  fi
+
+  local length=${#value}
+  if (( length > width )); then
+    printf "%s" "${value:0:width-1}${ellipsis}"
+  else
+    printf "%s" "$value"
+  fi
+}
+
 # Render disk usage files as a concise table so storage issues are easy to spot.
 # Raw df(1) numbers are converted to human readable units while we preserve the
 # original column order (filesystem, used, available, usage percent, mount).
@@ -309,8 +346,12 @@ log_disk_table() {
     return
   fi
 
-  log "Filesystem | Used | Available | Used% | Mounted on"
-  log "---------- | ---- | --------- | ----- | ----------"
+  # Fixed-width columns keep the storage overview aligned regardless of path
+  # lengths.  Filesystem and mount point entries are truncated with ellipses so
+  # unusually long strings do not break the layout.
+  local disk_format="%-20s %12s %12s %6s %-22s"
+  log "$(printf "$disk_format" "Filesystem" "Used" "Available" "Use%" "Mounted on")"
+  log "$(printf "$disk_format" "--------------------" "------------" "------------" "------" "----------------------")"
 
   awk 'NR>1 {
     used=$3 * 1024
@@ -328,8 +369,161 @@ log_disk_table() {
     local avail_hr
     used_hr=$(bytesToHumanReadable "${used_bytes:-0}")
     avail_hr=$(bytesToHumanReadable "${avail_bytes:-0}")
-    log "$(printf "%s | %s | %s | %s | %s" "$filesystem" "$used_hr" "$avail_hr" "$used_pct" "$mountpoint")"
+    local fs_field
+    local mount_field
+    fs_field=$(truncate_field "$filesystem" 20)
+    mount_field=$(truncate_field "$mountpoint" 22)
+    log "$(printf "$disk_format" "$fs_field" "$used_hr" "$avail_hr" "${used_pct:---}" "$mount_field")"
   done
+}
+
+# Summarise memory statistics captured by free(1) using aligned columns with
+# GiB conversions so usage trends are easier to read.
+log_memory_summary() {
+  local free_file="$1"
+
+  if [ ! -f "$free_file" ]; then
+    log "warning: missing memory statistics at $free_file"
+    return
+  fi
+
+  local mem_format="%-8s %14s %14s %14s %14s %16s %16s"
+  log "$(printf "$mem_format" "Name" "Total (GiB)" "Used (GiB)" "Free (GiB)" "Shared (GiB)" "Buff/Cache (GiB)" "Available (GiB)")"
+  log "$(printf "$mem_format" "--------" "--------------" "--------------" "--------------" "--------------" "----------------" "----------------")"
+
+  awk '
+    function to_gib(val) { return val / 1024 / 1024 }
+    $1 ~ /Mem:|Swap:/ {
+      name=$1
+      sub(":", "", name)
+      total=sprintf("%.2f", to_gib($2))
+      used=sprintf("%.2f", to_gib($3))
+      free=sprintf("%.2f", to_gib($4))
+      shared="--"
+      buff="--"
+      avail="--"
+      if (NF > 4) { shared=sprintf("%.2f", to_gib($5)) }
+      if (NF > 5) { buff=sprintf("%.2f", to_gib($6)) }
+      if (NF > 6) { avail=sprintf("%.2f", to_gib($7)) }
+      printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", name, total, used, free, shared, buff, avail
+    }
+  ' "$free_file" |
+  while IFS=$'\t' read -r name total used free shared buff avail; do
+    log "$(printf "$mem_format" "$name" "$total" "$used" "$free" "$shared" "$buff" "$avail")"
+  done
+}
+
+# Display top memory-consuming processes with RSS converted to GiB.  Commands
+# are truncated so the table keeps its shape even with long invocation strings.
+log_top_memory_consumers() {
+  local ps_file="$1"
+  local limit="${2:-5}"
+
+  if [ ! -f "$ps_file" ]; then
+    log "warning: missing process list at $ps_file"
+    return
+  fi
+
+  local proc_format="%-12s %14s %8s %-40s"
+  log "$(printf "$proc_format" "User" "RSS (GiB)" "%Mem" "Command")"
+  log "$(printf "$proc_format" "------------" "--------------" "------" "----------------------------------------")"
+
+  tail -n +2 "$ps_file" | sort -nrk6 | head -n "$limit" |
+  awk '
+    {
+      user=$1
+      rss_gib=$6 / 1024 / 1024
+      mem_pct=$4
+      cmd=$11
+      if (NF >= 11) {
+        for (i = 12; i <= NF; ++i) {
+          cmd = cmd " " $i
+        }
+      }
+      printf "%s\t%.6f\t%.6f\t%s\n", user, rss_gib, mem_pct, cmd
+    }
+  ' |
+  while IFS=$'\t' read -r user rss_gib mem_pct command; do
+    local rss_fmt
+    local mem_fmt
+    rss_fmt=$(printf "%.2f" "$rss_gib")
+    mem_fmt=$(printf "%.2f" "$mem_pct")
+    local cmd_field
+    cmd_field=$(truncate_field "$command" 40)
+    log "$(printf "$proc_format" "$user" "$rss_fmt" "$mem_fmt" "$cmd_field")"
+  done
+}
+
+# Aggregate RSS consumption per user to highlight which accounts carry the
+# heaviest memory footprint.  Totals are emitted in both KiB and GiB for
+# clarity when correlating with other tooling.
+log_memory_by_user() {
+  local ps_file="$1"
+
+  if [ ! -f "$ps_file" ]; then
+    log "warning: missing process list at $ps_file"
+    return
+  fi
+
+  local user_format="%-16s %16s"
+  log "$(printf "$user_format" "User" "RSS (GiB)")"
+  log "$(printf "$user_format" "----------------" "----------------")"
+
+  tail -n +2 "$ps_file" |
+  awk '{ rss[$1]+=$6 } END { for (user in rss) printf "%s\t%.6f\n", user, rss[user]/1024/1024 }' |
+  sort -t $'\t' -k2,2nr |
+  while IFS=$'\t' read -r user rss_gib; do
+    log "$(printf "$user_format" "$user" "$(printf "%.2f" "$rss_gib")")"
+  done
+
+  local total_kib
+  local total_gib
+  total_kib=$(tail -n +2 "$ps_file" | awk '{sum+=$6} END {printf "%.0f", sum}')
+  total_gib=$(awk -v kib="$total_kib" 'BEGIN { printf "%.2f", kib/1024/1024 }')
+  log "$(printf "%-16s %16s" "Total RSS (KiB)" "$total_kib")"
+  log "$(printf "%-16s %16s" "Total RSS (GiB)" "$total_gib")"
+}
+
+# Determine the SELinux mode from captured sosreport artefacts.  We prefer the
+# explicit getenforce/sestatus outputs and fall back to the configuration file
+# so the report can always state the observed policy mode.
+detect_selinux_status() {
+  local base_dir="$1"
+  local status=""
+
+  if [ -f "$base_dir/sos_commands/selinux/getenforce" ]; then
+    status=$(head -n1 "$base_dir/sos_commands/selinux/getenforce")
+  elif [ -f "$base_dir/sos_commands/selinux/sestatus" ]; then
+    status=$(awk -F: '/Current mode/ {gsub(/^[ \t]+/, "", $2); print $2; exit}' "$base_dir/sos_commands/selinux/sestatus")
+    if [ -z "$status" ]; then
+      status=$(awk -F: '/Mode from config file/ {gsub(/^[ \t]+/, "", $2); print $2; exit}' "$base_dir/sos_commands/selinux/sestatus")
+    fi
+  fi
+
+  if [ -z "$status" ] && [ -f "$base_dir/etc/selinux/config" ]; then
+    status=$(awk -F= '/^SELINUX=/ {gsub(/^[ \t]+/, "", $2); gsub(/[ \t]+$/, "", $2); print $2; exit}' "$base_dir/etc/selinux/config")
+  fi
+
+  status=$(printf "%s" "$status" | tr -d '\r' | sed 's/^ *//; s/ *$//')
+  if [ -z "$status" ]; then
+    return
+  fi
+
+  local lower_status
+  lower_status=$(printf "%s" "$status" | tr '[:upper:]' '[:lower:]')
+  case "$lower_status" in
+    enforcing)
+      status="Enforcing"
+      ;;
+    permissive)
+      status="Permissive"
+      ;;
+    disabled)
+      status="Disabled"
+      ;;
+  esac
+
+  printf "%s" "$status"
 }
 
 report()
@@ -403,6 +597,15 @@ report()
   log
 
   log_tee "## Selinux"
+  log
+
+  local selinux_status
+  selinux_status=$(detect_selinux_status "$base_dir")
+  if [ -n "$selinux_status" ]; then
+    log "SELINUX STATUS: $selinux_status"
+  else
+    log "SELINUX STATUS: Unknown"
+  fi
   log
 
   log "// selinux conf"
@@ -641,33 +844,18 @@ report()
   log_tee "## Memory"
   log
 
-  log "// memory usage"
-  log "cat $base_dir/free"
-  log "---"
-  log_cmd "cat $base_dir/free"
+  log "// memory usage overview"
+  log_memory_summary "$base_dir/free"
   log "---"
   log
 
   log "// TOP 5 memory consumers"
-  log "cat $base_dir/ps | sort -nrk6 | head -n5"
-  log "---"
-  log_cmd "cat $base_dir/ps | sort -nrk6 | head -n5"
+  log_top_memory_consumers "$base_dir/ps" 5
   log "---"
   log
 
   log "// users memory consumers"
-  log "cat $base_dir/ps | sort -nr | awk '{print \$1, \$6}' | $GREP -v ^USER | $GREP -v ^COMMAND | $GREP -v \"^ $\" | awk  '{a[\$1] += \$2} END{for (i in a) print i, a[i]}' | sort -nrk2"
-  log "and"
-  log "memory_usage=\$(cat $base_dir/ps | sort -nr | awk '{print \$6}' | grep -v ^-$ | $GREP -v ^RSS | $GREP -v ^$ | paste -s -d+ | bc)"
-  log "and"
-  log "memory_usage_gb=\$(echo \"scale=2;$memory_usage/1024/1024\" | bc)"
-  log "---"
-  log_cmd "cat $base_dir/ps | sort -nr | awk '{print \$1, \$6}' | $GREP -v ^USER | $GREP -v ^COMMAND | $GREP -v \"^ $\" | awk  '{a[\$1] += \$2} END{for (i in a) print i, a[i]}' | sort -nrk2"
-  log
-  memory_usage=$(cat $base_dir/ps | sort -nr | awk '{print $6}' | grep -v ^-$ | $GREP -v ^RSS | $GREP -v ^$ | paste -s -d+ | bc)
-  memory_usage_gb=$(echo "scale=2;$memory_usage/1024/1024" | bc)
-  log "Total Memory Consumed in KiB: $memory_usage"
-  log "Total Memory Consumed in GiB: $memory_usage_gb"
+  log_memory_by_user "$base_dir/ps"
   log "---"
   log
 
