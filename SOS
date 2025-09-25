@@ -9,6 +9,28 @@
 FOREMAN_REPORT="/tmp/$$.log"
 
 
+if command -v tput >/dev/null 2>&1; then
+  BOLD=$(tput bold)
+  BLUE=$(tput setaf 4)
+  GREEN=$(tput setaf 2)
+  RED=$(tput setaf 1)
+  YELLOW=$(tput setaf 3)
+  RESET=$(tput sgr0)
+else
+  BOLD=""
+  BLUE=""
+  GREEN=""
+  RED=""
+  YELLOW=""
+  RESET=""
+fi
+
+HEADER_COLOR="${BOLD}${BLUE}"
+SUCCESS_COLOR="${GREEN}"
+FAIL_COLOR="${RED}"
+WARNING_COLOR="${YELLOW}"
+SECTION_LINE="${HEADER_COLOR}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+
 # the following while block captures three flags from the command line
 # -c copies the output file from the /tmp directory to the current directory
 # -l opens the output file from the current directory
@@ -74,19 +96,100 @@ main()
   report $base_dir $base_foreman $sos_version
 }
 
-log_tee()
-{
-  echo $1 | tee -a $FOREMAN_REPORT
+choose_icon() {
+  local title_lower
+  title_lower=$(printf "%s" "$1" | tr '[:upper:]' '[:lower:]')
+  local icon="📁"
+
+  case "$title_lower" in
+    *service*|*daemon*|*systemctl*) icon="🔧" ;;
+    *hardware*|*bios*|*firmware*) icon="🛠️" ;;
+    *repo*|*repository*|*package*|*yum*|*dnf*) icon="📦" ;;
+    *network*|*naming*|*dns*|*hostname*) icon="🌐" ;;
+    *performance*|*cpu*|*load*) icon="🚀" ;;
+    *memory*|*swap*|*ram*) icon="🧠" ;;
+    *storage*|*disk*|*volume*|*filesystem*|*lvm*) icon="💾" ;;
+    *database*|*postgres*|*postgresql*) icon="🗄️" ;;
+    *task*|*job*|*queue*) icon="🧾" ;;
+    *log*|*audit*) icon="📝" ;;
+    *subscription*|*entitlement*|*license*) icon="🪙" ;;
+    *proxy*|*httpd*|*apache*) icon="🛡️" ;;
+    *security*|*ssl*|*certificate*) icon="🔐" ;;
+    *satellite*|*capsule*) icon="🛰️" ;;
+    *welcome*|*introduction*) icon="👋" ;;
+  esac
+
+  printf "%s" "$icon"
 }
 
-log()
-{
-  echo "$1" >> $FOREMAN_REPORT
+colorize() {
+  local msg="$1"
+
+  if [ -z "$msg" ]; then
+    printf "%s" ""
+    return
+  fi
+
+  local lower
+  lower=$(printf "%s" "$msg" | tr '[:upper:]' '[:lower:]')
+  local color="$RESET"
+
+  if [[ "$lower" == *"warning"* || "$lower" == *"caution"* ]]; then
+    color="$WARNING_COLOR"
+  elif [[ "$lower" == *"error"* || "$lower" == *"fail"* || "$lower" == *"panic"* || "$lower" == *"critical"* ]]; then
+    color="$FAIL_COLOR"
+  elif [[ "$lower" == *"success"* || "$lower" == *" ok"* || "$lower" == *"completed"* || "$lower" == *"pass"* ]]; then
+    color="$SUCCESS_COLOR"
+  fi
+
+  printf "%s%s%s" "$color" "$msg" "$RESET"
 }
 
-log_cmd()
-{
-  echo "$@" | bash &>> $FOREMAN_REPORT
+log_tee() {
+  local msg="$1"
+
+  if [ -z "$msg" ]; then
+    printf "\n" | tee -a "$FOREMAN_REPORT"
+    return
+  fi
+
+  if [[ "$msg" == \#\#* ]]; then
+    local title="$msg"
+    while [[ "$title" == \#* ]]; do
+      title="${title#\#}"
+    done
+    title="$(printf "%s" "$title" | sed 's/^ *//')"
+    local icon
+    icon=$(choose_icon "$title")
+    local header="${HEADER_COLOR}${icon} ${title}${RESET}"
+    printf "%b\n" "$SECTION_LINE" | tee -a "$FOREMAN_REPORT"
+    printf "%b\n" "$header" | tee -a "$FOREMAN_REPORT"
+    printf "%b\n" "$SECTION_LINE" | tee -a "$FOREMAN_REPORT"
+    return
+  fi
+
+  local colored
+  colored=$(colorize "$msg")
+  printf "%b\n" "$colored" | tee -a "$FOREMAN_REPORT"
+}
+
+log() {
+  local msg="$1"
+
+  if [ -z "$msg" ]; then
+    printf "\n" >> "$FOREMAN_REPORT"
+    return
+  fi
+
+  local colored
+  colored=$(colorize "$msg")
+  printf "%b\n" "$colored" >> "$FOREMAN_REPORT"
+}
+
+log_cmd() {
+  while IFS= read -r line || [ -n "$line" ]; do
+    log "$line"
+  done < <(echo "$@" | bash 2>&1)
 }
 
 # ref: https://unix.stackexchange.com/questions/44040/a-standard-tool-to-convert-a-byte-count-into-human-kib-mib-etc-like-du-ls1
