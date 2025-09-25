@@ -15,28 +15,230 @@ fi
 
 FOREMAN_REPORT="/tmp/$$.log"
 
+ENABLE_COLOR=1
+QUIET_MODE=0
 
-if command -v tput >/dev/null 2>&1; then
-  BOLD=$(tput bold)
-  BLUE=$(tput setaf 4)
-  GREEN=$(tput setaf 2)
-  RED=$(tput setaf 1)
-  YELLOW=$(tput setaf 3)
-  RESET=$(tput sgr0)
-else
-  BOLD=""
-  BLUE=""
-  GREEN=""
-  RED=""
-  YELLOW=""
-  RESET=""
+if [ -n "$NO_COLOR" ]; then
+  ENABLE_COLOR=0
 fi
 
-HEADER_COLOR="${BOLD}${BLUE}"
-SUCCESS_COLOR="${GREEN}"
-FAIL_COLOR="${RED}"
-WARNING_COLOR="${YELLOW}"
-SECTION_LINE="${HEADER_COLOR}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+init_colors() {
+  if [ "$ENABLE_COLOR" -eq 0 ]; then
+    RESET=""
+    BOLD=""
+    DIM=""
+    CYAN=""
+    BLUE=""
+    GREEN=""
+    YELLOW=""
+    RED=""
+    BRIGHT_RED=""
+    BOLD_CYAN=""
+    BOLD_BLUE=""
+    return
+  fi
+
+  if command -v tput >/dev/null 2>&1; then
+    BOLD=$(tput bold)
+    DIM=$(tput dim 2>/dev/null || printf '')
+    CYAN=$(tput setaf 6)
+    BLUE=$(tput setaf 4)
+    GREEN=$(tput setaf 2)
+    YELLOW=$(tput setaf 3)
+    RED=$(tput setaf 1)
+    RESET=$(tput sgr0)
+  else
+    BOLD=""
+    DIM=""
+    CYAN=""
+    BLUE=""
+    GREEN=""
+    YELLOW=""
+    RED=""
+    RESET=""
+  fi
+
+  BRIGHT_RED="${BOLD}${RED}"
+  BOLD_CYAN="${BOLD}${CYAN}"
+  BOLD_BLUE="${BOLD}${BLUE}"
+}
+
+color_for_tag() {
+  local tag="$1"
+
+  if [ "$ENABLE_COLOR" -eq 0 ]; then
+    printf ""
+    return
+  fi
+
+  case "$tag" in
+    ERROR) printf "%s" "$BRIGHT_RED" ;;
+    DENIED) printf "%s" "$BRIGHT_RED" ;;
+    WARN) printf "%s" "$YELLOW" ;;
+    OK) printf "%s" "$GREEN" ;;
+    INFO) printf "%s" "${DIM}${BLUE}" ;;
+    QUERY) printf "%s" "$CYAN" ;;
+    *) printf "" ;;
+  esac
+}
+
+wrap_tag() {
+  local tag="$1"
+  local color
+
+  color=$(color_for_tag "$tag")
+
+  if [ -n "$color" ]; then
+    printf "%s[%s]%s" "$color" "$tag" "$RESET"
+  else
+    printf "[%s]" "$tag"
+  fi
+}
+
+render_tagged_line() {
+  local tag="$1"
+  local text="$2"
+  local critical="${3:-0}"
+
+  local colored_tag
+  colored_tag=$(wrap_tag "$tag")
+
+  local message="$text"
+
+  if [ "$critical" -eq 1 ] && [ "$ENABLE_COLOR" -eq 1 ]; then
+    local color
+    color=$(color_for_tag "$tag")
+    if [ -n "$color" ]; then
+      if [[ "$message" == *" // "* ]]; then
+        local command_part="${message%% // *}"
+        local comment_part="${message#"$command_part"}"
+        message="${command_part}${color}${comment_part}${RESET}"
+      else
+        message="${color}${message}${RESET}"
+      fi
+    fi
+  fi
+
+  if [ -n "$message" ]; then
+    printf "%s %s" "$colored_tag" "$message"
+  else
+    printf "%s" "$colored_tag"
+  fi
+}
+
+print_line() {
+  local tag="$1"
+  shift
+  local text="$*"
+
+  render_tagged_line "$tag" "$text" 0
+  printf "\n"
+}
+
+print_critical() {
+  local tag="$1"
+  shift
+  local text="$*"
+
+  render_tagged_line "$tag" "$text" 1
+  printf "\n"
+}
+
+append_report_line() {
+  local line="$1"
+
+  if [ -z "$line" ]; then
+    printf "\n" >> "$FOREMAN_REPORT"
+  else
+    printf "%b\n" "$line" >> "$FOREMAN_REPORT"
+  fi
+}
+
+tag_is_suppressed() {
+  local tag="$1"
+  if [ "$QUIET_MODE" -eq 1 ] && [ "$tag" = "INFO" ]; then
+    return 0
+  fi
+  return 1
+}
+
+emit_tagged_line() {
+  local tag="$1"
+  local text="$2"
+  local critical="${3:-0}"
+  local to_stdout="${4:-0}"
+
+  if tag_is_suppressed "$tag"; then
+    return
+  fi
+
+  local line
+  line=$(render_tagged_line "$tag" "$text" "$critical")
+  append_report_line "$line"
+
+  if [ "$to_stdout" -eq 1 ]; then
+    printf "%b\n" "$line"
+  fi
+}
+
+emit_label_line() {
+  local label_text="$1"
+  local to_stdout="${2:-0}"
+  local colored_label="$label_text"
+
+  if [ "$ENABLE_COLOR" -eq 1 ]; then
+    colored_label="${BOLD_CYAN}${label_text}${RESET}"
+  fi
+
+  local line="// ${colored_label}"
+  append_report_line "$line"
+
+  if [ "$to_stdout" -eq 1 ]; then
+    printf "%b\n" "$line"
+  fi
+}
+
+format_plain_line() {
+  local text="$1"
+  printf "%s" "$text"
+}
+
+# capture long options first
+PARSED_ARGS=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --no-color)
+      ENABLE_COLOR=0
+      shift
+      ;;
+    --quiet)
+      QUIET_MODE=1
+      shift
+      ;;
+    --)
+      shift
+      while [ $# -gt 0 ]; do
+        PARSED_ARGS+=("$1")
+        shift
+      done
+      break
+      ;;
+    -*)
+      PARSED_ARGS+=("$1")
+      shift
+      ;;
+    *)
+      PARSED_ARGS+=("$1")
+      shift
+      ;;
+  esac
+done
+
+if [ ${#PARSED_ARGS[@]} -gt 0 ]; then
+  set -- "${PARSED_ARGS[@]}"
+else
+  set --
+fi
 
 # the following while block captures three flags from the command line
 # -c copies the output file from the /tmp directory to the current directory
@@ -61,6 +263,8 @@ while getopts "clt" opt "${NULL[@]}"; do
  esac
 done
 shift "$(($OPTIND -1))"
+
+init_colors
 
 MYPWD=`pwd`
 
@@ -129,34 +333,443 @@ choose_icon() {
   printf "%s" "$icon"
 }
 
-colorize() {
-  local msg="$1"
+LAST_LABEL=""
+PENDING_COMMAND=""
+CURRENT_SECTION=""
+SELINUX_DENIAL_ENFORCING=0
+SELINUX_DENIAL_PERMISSIVE=0
 
-  if [ -z "$msg" ]; then
+reset_selinux_counters() {
+  SELINUX_DENIAL_ENFORCING=0
+  SELINUX_DENIAL_PERMISSIVE=0
+}
+
+should_mark_query() {
+  local command_text="$1"
+  local lower_label=$(printf "%s" "$LAST_LABEL" | tr '[:upper:]' '[:lower:]')
+  local lower_cmd=$(printf "%s" "$command_text" | tr '[:upper:]' '[:lower:]')
+
+  if [[ "$lower_label" == *"search"* || "$lower_label" == *"lookup"* || "$lower_label" == *"query"* ]]; then
+    return 0
+  fi
+
+  if [[ "$lower_cmd" == *"search"* || "$lower_cmd" == *"lookup"* || "$lower_cmd" == *"query"* ]]; then
+    return 0
+  fi
+
+  return 1
+}
+
+format_label_text() {
+  local label="$1"
+  printf "%s" "$label"
+}
+
+is_command_reference() {
+  local text="$1"
+  local trimmed
+  trimmed=$(printf "%s" "$text" | sed 's/^ *//')
+
+  case "$trimmed" in
+    cat\ *|grep\ *|egrep\ *|awk\ *|sed\ *|tail\ *|head\ *|sort\ *|find\ *|ls\ *|for\ *|ps\ *|systemctl\ *|journalctl\ *|bash\ *|sh\ *|rg\ *|diff\ *|cut\ *|uniq\ *|tr\ *|wc\ *|printf\ *|python\ *|perl\ *|while\ *|xargs\ *|du\ *)
+      return 0
+      ;;
+  esac
+
+  if [[ "$trimmed" == /* ]]; then
+    return 0
+  fi
+
+  if [[ "$trimmed" == *" | "* || "$trimmed" == *" > "* || "$trimmed" == *" < "* || "$trimmed" == *" || "* ]]; then
+    return 0
+  fi
+
+  return 1
+}
+
+emit_section_heading() {
+  local title="$1"
+  local level="$2"
+  local color="$BOLD_CYAN"
+  local prefix="==="
+  local suffix="==="
+
+  if [ "$level" = "sub" ]; then
+    color="$BOLD_BLUE"
+    prefix="---"
+    suffix="---"
+  fi
+
+  local heading="${prefix} ${title} ${suffix}"
+  if [ "$ENABLE_COLOR" -eq 1 ]; then
+    append_report_line "${color}${heading}${RESET}"
+    printf "%b\n" "${color}${heading}${RESET}"
+  else
+    append_report_line "$heading"
+    printf "%s\n" "$heading"
+  fi
+}
+
+emit_selinux_status() {
+  local status=""
+  local status_file=""
+
+  if [ -f "$base_dir/sos_commands/selinux/getenforce" ]; then
+    status=$(head -n1 "$base_dir/sos_commands/selinux/getenforce" 2>/dev/null)
+  elif [ -f "$base_dir/sos_commands/selinux/sestatus" ]; then
+    status=$(grep -i "^Current mode:" "$base_dir/sos_commands/selinux/sestatus" 2>/dev/null | awk '{print $3}')
+  fi
+
+  if [ -z "$status" ]; then
+    return
+  fi
+
+  local normalized=$(printf "%s" "$status" | tr '[:upper:]' '[:lower:]')
+  case "$normalized" in
+    enforcing)
+      emit_tagged_line "OK" "SELINUX STATUS: Enforcing" 0 0
+      ;;
+    permissive)
+      emit_tagged_line "WARN" "SELINUX STATUS: Permissive" 0 0
+      ;;
+    disabled)
+      emit_tagged_line "ERROR" "SELINUX STATUS: Disabled" 1 0
+      ;;
+  esac
+}
+
+highlight_permissive_flag() {
+  local text="$1"
+  local flag="$2"
+  local reapply="$3"
+
+  if [ "$ENABLE_COLOR" -eq 0 ]; then
+    printf "%s" "$text"
+    return
+  fi
+
+  local replacement
+  case "$flag" in
+    permissive=0)
+      replacement="${BOLD}${flag}${RESET}${reapply}"
+      ;;
+    permissive=1)
+      replacement="${YELLOW}${flag}${RESET}"
+      ;;
+    *)
+      printf "%s" "$text"
+      return
+      ;;
+  esac
+
+  printf "%s" "${text//$flag/$replacement}"
+}
+
+process_selinux_config() {
+  local config_path="$1"
+
+  if [ ! -f "$config_path" ]; then
+    emit_tagged_line "WARN" "SELinux config not found // $config_path" 0 0
+    return
+  fi
+
+  while IFS= read -r line || [ -n "$line" ]; do
+    if [[ "$line" =~ ^SELINUX= ]]; then
+      local value=${line#SELINUX=}
+      local lower=$(printf "%s" "$value" | tr '[:upper:]' '[:lower:]')
+      case "$lower" in
+        enforcing)
+          emit_tagged_line "OK" "$line" 0 0
+          ;;
+        permissive)
+          emit_tagged_line "WARN" "$line" 0 0
+          ;;
+        disabled)
+          emit_tagged_line "ERROR" "$line" 1 0
+          ;;
+        *)
+          emit_tagged_line "INFO" "$line" 0 0
+          ;;
+      esac
+    elif [[ "$line" =~ ^SELINUXTYPE= ]]; then
+      emit_tagged_line "INFO" "$line" 0 0
+    else
+      emit_tagged_line "INFO" "$line" 0 0
+    fi
+  done < "$config_path"
+}
+
+process_selinux_denials() {
+  local audit_log="$1"
+
+  if [ ! -f "$audit_log" ]; then
+    emit_tagged_line "WARN" "audit.log not found // $audit_log" 0 0
+    return
+  fi
+
+  local tmpfile
+  tmpfile=$(mktemp)
+  awk 'tolower($0) ~ /denied/ {idx=index($0, "denied"); if (idx > 0) print substr($0, idx)}' "$audit_log" | sort -u > "$tmpfile"
+
+  while IFS= read -r entry || [ -n "$entry" ]; do
+    if [ -z "$entry" ]; then
+      continue
+    fi
+
+    local processed="$entry"
+
+    if [[ "$entry" == *"permissive=0"* ]]; then
+      SELINUX_DENIAL_ENFORCING=$((SELINUX_DENIAL_ENFORCING + 1))
+      if [ "$ENABLE_COLOR" -eq 1 ]; then
+        processed=$(highlight_permissive_flag "$processed" "permissive=0" "$(color_for_tag DENIED)")
+      fi
+      emit_tagged_line "DENIED" "$processed" 1 0
+    elif [[ "$entry" == *"permissive=1"* ]]; then
+      SELINUX_DENIAL_PERMISSIVE=$((SELINUX_DENIAL_PERMISSIVE + 1))
+      if [ "$ENABLE_COLOR" -eq 1 ]; then
+        processed=$(highlight_permissive_flag "$processed" "permissive=1" "")
+      fi
+      emit_tagged_line "DENIED" "$processed" 0 0
+    else
+      emit_tagged_line "DENIED" "$processed" 1 0
+    fi
+  done < "$tmpfile"
+
+  rm -f "$tmpfile"
+
+  local summary
+  summary=$(printf "Denials (enforcing): %d  | Denials (permissive logged): %d" "$SELINUX_DENIAL_ENFORCING" "$SELINUX_DENIAL_PERMISSIVE")
+  emit_tagged_line "INFO" "$summary" 0 0
+}
+
+format_size_value() {
+  local kib="$1"
+  if [ -z "$kib" ]; then
+    printf "0.0M"
+    return
+  fi
+
+  local mib
+  mib=$(awk -v val="$kib" 'BEGIN {printf "%.1f", val/1024}')
+  awk -v mib="$mib" 'BEGIN { if (mib >= 1024) printf "%.1fG", mib/1024; else printf "%.1fM", mib }'
+}
+
+to_mib() {
+  local value="$1"
+  local unit="${2:-KiB}"
+
+  awk -v val="$value" -v unit="$unit" 'BEGIN {
+    if (val == "") { printf "0.0"; exit }
+    if (unit == "bytes" || unit == "B" || unit == "bytes") {
+      printf "%.1f", val/1048576
+    } else if (unit == "MiB" || unit == "mib" || unit == "MB" || unit == "mb" || unit == "M") {
+      printf "%.1f", val
+    } else {
+      printf "%.1f", val/1024
+    }
+  }'
+}
+
+col_trunc() {
+  local string="$1"
+  local max_len="$2"
+  local ellipsis="${3:-...}"
+
+  local length=${#string}
+  local ellipsis_length=${#ellipsis}
+
+  if [ "$max_len" -le 0 ]; then
     printf "%s" ""
     return
   fi
 
-  local lower
-  lower=$(printf "%s" "$msg" | tr '[:upper:]' '[:lower:]')
-  local color="$RESET"
-
-  if [[ "$lower" == *"warning"* || "$lower" == *"caution"* ]]; then
-    color="$WARNING_COLOR"
-  elif [[ "$lower" == *"error"* || "$lower" == *"fail"* || "$lower" == *"panic"* || "$lower" == *"critical"* ]]; then
-    color="$FAIL_COLOR"
-  elif [[ "$lower" == *"success"* || "$lower" == *" ok"* || "$lower" == *"completed"* || "$lower" == *"pass"* ]]; then
-    color="$SUCCESS_COLOR"
+  if [ "$length" -le "$max_len" ]; then
+    printf "%s" "$string"
+    return
   fi
 
-  printf "%s%s%s" "$color" "$msg" "$RESET"
+  local cut=$((max_len - ellipsis_length))
+  if [ "$cut" -le 0 ]; then
+    printf "%s" "$ellipsis"
+    return
+  fi
+
+  printf "%s%s" "${string:0:cut}" "$ellipsis"
+}
+
+print_table_row() {
+  local fmt="$1"
+  shift
+  printf "$fmt\n" "$@"
+}
+
+render_disk_table() {
+  local df_path="$1"
+
+  if [ ! -f "$df_path" ]; then
+    emit_tagged_line "WARN" "df data not found // $df_path" 0 0
+    return
+  fi
+
+  local header
+  header=$(print_table_row "%-24s %10s %11s %6s %-s" "Filesystem" "Used(MiB)" "Avail(MiB)" "Use%" "Mount")
+  emit_tagged_line "INFO" "$header" 0 0
+
+  local separator
+  separator=$(print_table_row "%-24s %10s %11s %6s %-s" "------------------------" "----------" "-----------" "------" "-----")
+  emit_tagged_line "INFO" "$separator" 0 0
+
+  local data
+  data=$(awk 'NR>1 {fs=$1; used=$3; avail=$4; usep=$5; mount=$6; if (NF>6) {for(i=7;i<=NF;++i){mount=mount" "$i}}; printf "%s\t%s\t%s\t%s\t%s\n", fs, used, avail, usep, mount}' "$df_path")
+
+  while IFS=$'\t' read -r fs used avail usepct mount || [ -n "$fs" ]; do
+    if [ -z "$fs" ]; then
+      continue
+    fi
+
+    local fs_col
+    fs_col=$(col_trunc "$fs" 24 "...")
+    local mount_col
+    mount_col=$(col_trunc "$mount" 40 "...")
+    local used_fmt
+    used_fmt=$(format_size_value "$used")
+    local avail_fmt
+    avail_fmt=$(format_size_value "$avail")
+
+    local row
+    row=$(print_table_row "%-24s %10s %11s %6s %-s" "$fs_col" "$used_fmt" "$avail_fmt" "$usepct" "$mount_col")
+    emit_tagged_line "INFO" "$row" 0 0
+  done <<EOF
+$data
+EOF
+}
+
+render_memory_table() {
+  local free_path="$1"
+
+  if [ ! -f "$free_path" ]; then
+    emit_tagged_line "WARN" "free output not found // $free_path" 0 0
+    return
+  fi
+
+  local header
+  header=$(print_table_row "%-6s %12s %11s %11s %17s %11s" "Type" "Total(MiB)" "Used(MiB)" "Free(MiB)" "Buff/Cache(MiB)" "Avail(MiB)")
+  emit_tagged_line "INFO" "$header" 0 0
+
+  local separator
+  separator=$(print_table_row "%-6s %12s %11s %11s %17s %11s" "------" "------------" "-----------" "-----------" "-----------------" "-----------")
+  emit_tagged_line "INFO" "$separator" 0 0
+
+  local mem_line
+  mem_line=$(awk '/^Mem:/ {print $2" "$3" "$4" "$6" "$7}' "$free_path")
+  if [ -n "$mem_line" ]; then
+    read -r mem_total mem_used mem_free mem_buff mem_avail <<EOF
+$mem_line
+EOF
+    local row
+    row=$(print_table_row "%-6s %12s %11s %11s %17s %11s" "Mem" "$(format_size_value "$mem_total")" "$(format_size_value "$mem_used")" "$(format_size_value "$mem_free")" "$(format_size_value "$mem_buff")" "$(format_size_value "$mem_avail")")
+    emit_tagged_line "INFO" "$row" 0 0
+  fi
+
+  local swap_line
+  swap_line=$(awk '/^Swap:/ {print $2" "$3" "$4}' "$free_path")
+  if [ -n "$swap_line" ]; then
+    read -r swap_total swap_used swap_free <<EOF
+$swap_line
+EOF
+    local row
+    row=$(print_table_row "%-6s %12s %11s %11s %17s %11s" "Swap" "$(format_size_value "$swap_total")" "$(format_size_value "$swap_used")" "$(format_size_value "$swap_free")" "-" "-")
+    emit_tagged_line "INFO" "$row" 0 0
+  fi
+}
+
+render_top_memory_consumers() {
+  local ps_path="$1"
+
+  if [ ! -f "$ps_path" ]; then
+    emit_tagged_line "WARN" "process listing not found // $ps_path" 0 0
+    return
+  fi
+
+  local header
+  header=$(print_table_row "%-10s %7s %9s %6s %-s" "USER" "PID" "RSS(MiB)" "%MEM" "COMMAND")
+  emit_tagged_line "INFO" "$header" 0 0
+
+  local separator
+  separator=$(print_table_row "%-10s %7s %9s %6s %-s" "----------" "-------" "---------" "------" "-------")
+  emit_tagged_line "INFO" "$separator" 0 0
+
+  local tmpfile
+  tmpfile=$(mktemp)
+  awk 'NR>1 {rss=$6; pmem=$4; user=$1; pid=$2; cmd=$11; if (NF>11){for(i=12;i<=NF;++i){cmd=cmd" "$i}}; printf "%s\t%s\t%s\t%s\t%s\n", user, pid, rss, pmem, cmd}' "$ps_path" | sort -k3 -nr | head -n5 > "$tmpfile"
+
+  while IFS=$'\t' read -r user pid rss pmem cmd || [ -n "$user" ]; do
+    if [ -z "$user" ]; then
+      continue
+    fi
+    local rss_fmt
+    rss_fmt=$(to_mib "$rss")
+    local cmd_col
+    cmd_col=$(col_trunc "$cmd" 60 "...")
+    local row
+    row=$(print_table_row "%-10s %7s %9.1f %6.1f %-s" "$user" "$pid" "$rss_fmt" "$pmem" "$cmd_col")
+    emit_tagged_line "INFO" "$row" 0 0
+  done < "$tmpfile"
+
+  rm -f "$tmpfile"
+}
+
+render_user_memory_totals() {
+  local ps_path="$1"
+
+  if [ ! -f "$ps_path" ]; then
+    emit_tagged_line "WARN" "process listing not found // $ps_path" 0 0
+    return
+  fi
+
+  local header
+  header=$(print_table_row "%-12s %15s" "USER" "SUM_RSS(MiB)")
+  emit_tagged_line "INFO" "$header" 0 0
+
+  local separator
+  separator=$(print_table_row "%-12s %15s" "------------" "---------------")
+  emit_tagged_line "INFO" "$separator" 0 0
+
+  local tmpfile
+  tmpfile=$(mktemp)
+  awk 'NR>1 {rss[$1]+=$6} END {for (user in rss) printf "%s\t%s\n", user, rss[user]}' "$ps_path" | sort -k2 -nr > "$tmpfile"
+
+  while IFS=$'\t' read -r user rss || [ -n "$user" ]; do
+    if [ -z "$user" ]; then
+      continue
+    fi
+    local rss_fmt
+    rss_fmt=$(to_mib "$rss")
+    local row
+    row=$(print_table_row "%-12s %15.1f" "$user" "$rss_fmt")
+    emit_tagged_line "INFO" "$row" 0 0
+  done < "$tmpfile"
+
+  rm -f "$tmpfile"
 }
 
 log_tee() {
+  if [ $# -eq 0 ]; then
+    append_report_line ""
+    printf "\n"
+    return
+  fi
+
   local msg="$1"
 
-  if [ -z "$msg" ]; then
-    printf "\n" | tee -a "$FOREMAN_REPORT"
+  if [[ "$msg" == \#\#\#* ]]; then
+    local title="$msg"
+    while [[ "$title" == \#* ]]; do
+      title="${title#\#}"
+    done
+    title="$(printf "%s" "$title" | sed 's/^ *//; s/ *$//')"
+    emit_section_heading "$title" "top"
+    CURRENT_SECTION="$title"
     return
   fi
 
@@ -165,38 +778,107 @@ log_tee() {
     while [[ "$title" == \#* ]]; do
       title="${title#\#}"
     done
-    title="$(printf "%s" "$title" | sed 's/^ *//')"
-    local icon
-    icon=$(choose_icon "$title")
-    local header="${HEADER_COLOR}${icon} ${title}${RESET}"
-    printf "%b\n" "$SECTION_LINE" | tee -a "$FOREMAN_REPORT"
-    printf "%b\n" "$header" | tee -a "$FOREMAN_REPORT"
-    printf "%b\n" "$SECTION_LINE" | tee -a "$FOREMAN_REPORT"
+    title="$(printf "%s" "$title" | sed 's/^ *//; s/ *$//')"
+    emit_section_heading "$title" "sub"
+    CURRENT_SECTION="$title"
+    if [[ "${title,,}" == *"selinux"* ]]; then
+      reset_selinux_counters
+      emit_selinux_status
+    fi
     return
   fi
 
-  local colored
-  colored=$(colorize "$msg")
-  printf "%b\n" "$colored" | tee -a "$FOREMAN_REPORT"
+  emit_tagged_line "INFO" "$msg" 0 1
 }
 
 log() {
-  local msg="$1"
-
-  if [ -z "$msg" ]; then
-    printf "\n" >> "$FOREMAN_REPORT"
+  if [ $# -eq 0 ]; then
+    append_report_line ""
     return
   fi
 
-  local colored
-  colored=$(colorize "$msg")
-  printf "%b\n" "$colored" >> "$FOREMAN_REPORT"
+  local msg="$1"
+
+  if [ -z "$msg" ]; then
+    append_report_line ""
+    return
+  fi
+
+  if [[ "$msg" == "---" ]]; then
+    append_report_line ""
+    return
+  fi
+
+  if [[ "$msg" == //\ * ]]; then
+    local label="${msg#// }"
+    LAST_LABEL="$label"
+    emit_label_line "$label" 1
+    return
+  fi
+
+  if is_command_reference "$msg"; then
+    PENDING_COMMAND="$msg"
+    return
+  fi
+
+  emit_tagged_line "INFO" "$msg" 0 0
 }
 
 log_cmd() {
+  local raw_command="$*"
+  local display_command="$raw_command"
+
+  if [ -n "$PENDING_COMMAND" ]; then
+    display_command="$PENDING_COMMAND"
+    PENDING_COMMAND=""
+  fi
+
+  local command_tag="INFO"
+  if ! should_mark_query "$display_command"; then
+    command_tag="QUERY"
+  fi
+
+  emit_tagged_line "$command_tag" "$display_command" 0 0
+
+  case "$raw_command" in
+    "cat $base_dir/df")
+      render_disk_table "$base_dir/df"
+      return
+      ;;
+    "cat $base_dir/free")
+      render_memory_table "$base_dir/free"
+      return
+      ;;
+    "cat $base_dir/ps | sort -nrk6 | head -n5")
+      render_top_memory_consumers "$base_dir/ps"
+      return
+      ;;
+    "cat $base_dir/ps | sort -nr | awk '{print \\\$1, \\\$6}' |"*)
+      render_user_memory_totals "$base_dir/ps"
+      return
+      ;;
+    "cat $base_dir/etc/selinux/config")
+      process_selinux_config "$base_dir/etc/selinux/config"
+      return
+      ;;
+  esac
+
+  if [[ "$raw_command" == *"var/log/audit/audit.log"* && "$raw_command" == *"denied"* ]]; then
+    process_selinux_denials "$base_dir/var/log/audit/audit.log"
+    return
+  fi
+
+  local cmd_output
+  cmd_output=$(bash -lc "$raw_command" 2>&1)
+  local status=$?
+
   while IFS= read -r line || [ -n "$line" ]; do
-    log "$line"
-  done < <(echo "$@" | bash 2>&1)
+    emit_tagged_line "INFO" "$line" 0 0
+  done <<< "$cmd_output"
+
+  if [ $status -ne 0 ]; then
+    emit_tagged_line "ERROR" "command exited with status $status // $display_command" 1 0
+  fi
 }
 
 # ref: https://unix.stackexchange.com/questions/44040/a-standard-tool-to-convert-a-byte-count-into-human-kib-mib-etc-like-du-ls1
