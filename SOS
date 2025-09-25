@@ -685,7 +685,7 @@ log_disk_table() {
   if [ -n "$rendered" ]; then
     write_output "file" "$rendered"
   fi
-<<<<<<< ours
+
 
   local separator
   separator=$(print_table_row "$disk_format" "------------------------" "----------" "-----------" "------" "------------------------------")
@@ -694,16 +694,6 @@ log_disk_table() {
     write_output "file" "$rendered"
   fi
 
-=======
-
-  local separator
-  separator=$(print_table_row "$disk_format" "------------------------" "----------" "-----------" "------" "------------------------------")
-  rendered=$(print_line INFO "$separator")
-  if [ -n "$rendered" ]; then
-    write_output "file" "$rendered"
-  fi
-
->>>>>>> theirs
   tail -n +2 "$df_file" |
   awk '{
     used=$3
