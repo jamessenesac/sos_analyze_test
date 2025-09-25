@@ -8,28 +8,85 @@
 
 FOREMAN_REPORT="/tmp/$$.log"
 
+# Honour a --no-color flag or NO_COLOR environment variable before we derive
+# any palette values so downstream logging can easily disable ANSI codes.
+DISABLE_COLOR=""
+if [ -n "$NO_COLOR" ]; then
+  DISABLE_COLOR=1
+fi
+
+CLEANED_ARGS=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --no-color)
+      DISABLE_COLOR=1
+      shift
+      ;;
+    --)
+      shift
+      while [ $# -gt 0 ]; do
+        CLEANED_ARGS+=("$1")
+        shift
+      done
+      break
+      ;;
+    *)
+      CLEANED_ARGS+=("$1")
+      shift
+      ;;
+  esac
+done
+set -- "${CLEANED_ARGS[@]}"
 
 if command -v tput >/dev/null 2>&1; then
   BOLD=$(tput bold)
   BLUE=$(tput setaf 4)
+  CYAN=$(tput setaf 6)
   GREEN=$(tput setaf 2)
+  MAGENTA=$(tput setaf 5)
   RED=$(tput setaf 1)
   YELLOW=$(tput setaf 3)
   RESET=$(tput sgr0)
 else
   BOLD=""
   BLUE=""
+  CYAN=""
   GREEN=""
+  MAGENTA=""
   RED=""
   YELLOW=""
   RESET=""
 fi
 
-HEADER_COLOR="${BOLD}${BLUE}"
-SUCCESS_COLOR="${GREEN}"
-FAIL_COLOR="${RED}"
-WARNING_COLOR="${YELLOW}"
-SECTION_LINE="${HEADER_COLOR}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+HEADER_COLOR="${BOLD}${CYAN}"
+SUBHEADER_COLOR="${BOLD}${BLUE}"
+INFO_COLOR="${BLUE}"
+DENIED_COLOR="${BOLD}${RED}"
+ERROR_COLOR="${BOLD}${RED}"
+WARNING_COLOR="${BOLD}${YELLOW}"
+SUCCESS_COLOR="${BOLD}${GREEN}"
+QUERY_COLOR="${BOLD}${CYAN}"
+RETRY_COLOR="${BOLD}${MAGENTA}"
+
+if [ -n "$DISABLE_COLOR" ]; then
+  BOLD=""
+  BLUE=""
+  CYAN=""
+  GREEN=""
+  MAGENTA=""
+  RED=""
+  YELLOW=""
+  RESET=""
+  HEADER_COLOR=""
+  SUBHEADER_COLOR=""
+  INFO_COLOR=""
+  DENIED_COLOR=""
+  ERROR_COLOR=""
+  WARNING_COLOR=""
+  SUCCESS_COLOR=""
+  QUERY_COLOR=""
+  RETRY_COLOR=""
+fi
 
 # the following while block captures three flags from the command line
 # -c copies the output file from the /tmp directory to the current directory
@@ -96,32 +153,6 @@ main()
   report $base_dir $base_foreman $sos_version
 }
 
-choose_icon() {
-  local title_lower
-  title_lower=$(printf "%s" "$1" | tr '[:upper:]' '[:lower:]')
-  local icon="📁"
-
-  case "$title_lower" in
-    *service*|*daemon*|*systemctl*) icon="🔧" ;;
-    *hardware*|*bios*|*firmware*) icon="🛠️" ;;
-    *repo*|*repository*|*package*|*yum*|*dnf*) icon="📦" ;;
-    *network*|*naming*|*dns*|*hostname*) icon="🌐" ;;
-    *performance*|*cpu*|*load*) icon="🚀" ;;
-    *memory*|*swap*|*ram*) icon="🧠" ;;
-    *storage*|*disk*|*volume*|*filesystem*|*lvm*) icon="💾" ;;
-    *database*|*postgres*|*postgresql*) icon="🗄️" ;;
-    *task*|*job*|*queue*) icon="🧾" ;;
-    *log*|*audit*) icon="📝" ;;
-    *subscription*|*entitlement*|*license*) icon="🪙" ;;
-    *proxy*|*httpd*|*apache*) icon="🛡️" ;;
-    *security*|*ssl*|*certificate*) icon="🔐" ;;
-    *satellite*|*capsule*) icon="🛰️" ;;
-    *welcome*|*introduction*) icon="👋" ;;
-  esac
-
-  printf "%s" "$icon"
-}
-
 colorize() {
   local msg="$1"
 
@@ -130,19 +161,41 @@ colorize() {
     return
   fi
 
+  # Categorise log lines using keywords so we can attach tags such as
+  # [ERROR], [WARN], [DENIED], etc.  Matching is done in lowercase to keep the
+  # checks case-insensitive.
   local lower
   lower=$(printf "%s" "$msg" | tr '[:upper:]' '[:lower:]')
-  local color="$RESET"
+  local tag="[INFO]"
+  local color="$INFO_COLOR"
 
-  if [[ "$lower" == *"warning"* || "$lower" == *"caution"* ]]; then
+  if [[ "$lower" == *"denied"* || "$lower" == *"permission denied"* || "$lower" == *"avc: denied"* ]]; then
+    tag="[DENIED]"
+    color="$DENIED_COLOR"
+  elif [[ "$lower" == *"error"* || "$lower" == *"fail"* || "$lower" == *"fatal"* || "$lower" == *"panic"* || "$lower" == *"critical"* ]]; then
+    tag="[ERROR]"
+    color="$ERROR_COLOR"
+  elif [[ "$lower" == *"warning"* || "$lower" == *"caution"* || "$lower" == *"deprecated"* || "$lower" == *"skipping"* ]]; then
+    tag="[WARN]"
     color="$WARNING_COLOR"
-  elif [[ "$lower" == *"error"* || "$lower" == *"fail"* || "$lower" == *"panic"* || "$lower" == *"critical"* ]]; then
-    color="$FAIL_COLOR"
-  elif [[ "$lower" == *"success"* || "$lower" == *" ok"* || "$lower" == *"completed"* || "$lower" == *"pass"* ]]; then
+  elif [[ "$lower" == *"success"* || "$lower" == *"completed"* || "$lower" == *"passed"* || "$lower" == *" ok"* || "$lower" == "ok" ]]; then
+    tag="[OK]"
     color="$SUCCESS_COLOR"
+  elif [[ "$lower" == *"grep"* || "$lower" == *"search"* || "$lower" == *"lookup"* || "$lower" == *"find"* || "$lower" == *"awk"* || "$lower" == *"sed"* ]]; then
+    tag="[QUERY]"
+    color="$QUERY_COLOR"
+  elif [[ "$lower" == *"timeout"* || "$lower" == *"retry"* || "$lower" == *"connection refused"* || "$lower" == *"waiting"* ]]; then
+    tag="[RETRY]"
+    color="$RETRY_COLOR"
   fi
 
-  printf "%s%s%s" "$color" "$msg" "$RESET"
+  local line="${tag} ${msg}"
+
+  if [ -n "$DISABLE_COLOR" ] || [ -z "$color" ]; then
+    printf "%s" "$line"
+  else
+    printf "%s%s%s" "$color" "$line" "$RESET"
+  fi
 }
 
 log_tee() {
@@ -153,24 +206,34 @@ log_tee() {
     return
   fi
 
-  if [[ "$msg" == \#\#* ]]; then
-    local title="$msg"
-    while [[ "$title" == \#* ]]; do
-      title="${title#\#}"
-    done
-    title="$(printf "%s" "$title" | sed 's/^ *//')"
-    local icon
-    icon=$(choose_icon "$title")
-    local header="${HEADER_COLOR}${icon} ${title}${RESET}"
-    printf "%b\n" "$SECTION_LINE" | tee -a "$FOREMAN_REPORT"
-    printf "%b\n" "$header" | tee -a "$FOREMAN_REPORT"
-    printf "%b\n" "$SECTION_LINE" | tee -a "$FOREMAN_REPORT"
+  if [[ "$msg" == \#* ]]; then
+    # Treat Markdown-like headings as section separators with ASCII framing so
+    # long reports remain easy to skim.
+    local prefix="${msg%%[^#]*}"
+    local level=${#prefix}
+    local heading
+    heading=$(printf "%s" "${msg#$prefix}" | sed 's/^ *//; s/[ #]*$//')
+
+    local decorated
+    local color="$HEADER_COLOR"
+    if (( level <= 2 )); then
+      decorated="=== ${heading} ==="
+    else
+      decorated="--- ${heading} ---"
+      color="$SUBHEADER_COLOR"
+    fi
+
+    if [ -n "$DISABLE_COLOR" ] || [ -z "$color" ]; then
+      printf "%s\n" "$decorated" | tee -a "$FOREMAN_REPORT"
+    else
+      printf "%s%s%s\n" "$color" "$decorated" "$RESET" | tee -a "$FOREMAN_REPORT"
+    fi
     return
   fi
 
   local colored
   colored=$(colorize "$msg")
-  printf "%b\n" "$colored" | tee -a "$FOREMAN_REPORT"
+  printf "%s\n" "$colored" | tee -a "$FOREMAN_REPORT"
 }
 
 log() {
@@ -183,7 +246,7 @@ log() {
 
   local colored
   colored=$(colorize "$msg")
-  printf "%b\n" "$colored" >> "$FOREMAN_REPORT"
+  printf "%s\n" "$colored" >> "$FOREMAN_REPORT"
 }
 
 log_cmd() {
