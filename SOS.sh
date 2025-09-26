@@ -106,6 +106,52 @@ wrap_tag() {
   fi
 }
 
+escape_sed_replacement() {
+  printf '%s' "$1" | sed -e 's/[&/\\]/\\&/g'
+}
+
+highlight_message_keywords() {
+  local tag="$1"
+  local message="$2"
+
+  if [ "$ENABLE_COLOR" -eq 0 ]; then
+    printf "%s" "$message"
+    return
+  fi
+
+  local color
+  color=$(color_for_tag "$tag")
+  if [ -z "$color" ]; then
+    printf "%s" "$message"
+    return
+  fi
+
+  local pattern=""
+  case "$tag" in
+    ERROR)
+      pattern='((traceback|error|exception|keyerror|fail(ed|ure)?|fatal|panic|cannot|permission denied|no space left|timeout))'
+      ;;
+    DENIED)
+      pattern='((denied))'
+      ;;
+    WARN)
+      pattern='((warn(ing)?))'
+      ;;
+  esac
+
+  if [ -z "$pattern" ]; then
+    printf "%s" "$message"
+    return
+  fi
+
+  local escaped_color
+  escaped_color=$(escape_sed_replacement "$color")
+  local escaped_reset
+  escaped_reset=$(escape_sed_replacement "$RESET")
+
+  printf "%s" "$message" | sed -E "s/${pattern}/${escaped_color}\\1${escaped_reset}/Ig"
+}
+
 render_tagged_line() {
   local tag="$1"
   local text="$2"
@@ -113,18 +159,8 @@ render_tagged_line() {
 
   local message="$text"
 
-  if [ "$critical" -eq 1 ] && [ "$ENABLE_COLOR" -eq 1 ]; then
-    local color
-    color=$(color_for_tag "$tag")
-    if [ -n "$color" ]; then
-      if [[ "$message" == *" // "* ]]; then
-        local command_part="${message%% // *}"
-        local comment_part="${message#"$command_part"}"
-        message="${command_part}${color}${comment_part}${RESET}"
-      else
-        message="${color}${message}${RESET}"
-      fi
-    fi
+  if [ "$critical" -eq 1 ]; then
+    message=$(highlight_message_keywords "$tag" "$message")
   fi
 
   if [ -z "$tag" ]; then
@@ -147,6 +183,11 @@ classify_text_line() {
 
   if [ -z "$text" ]; then
     printf ":0"
+    return
+  fi
+
+  if printf "%s" "$text" | grep -Eiq 'no such file or directory'; then
+    printf "WARN:0"
     return
   fi
 
