@@ -440,7 +440,7 @@ emit_section_heading() {
   local suffix="==="
 
   if [ "$level" = "sub" ]; then
-    color="$BOLD_BLUE"
+    color="$BOLD_WHITE"
     prefix="---"
     suffix="---"
   fi
@@ -713,6 +713,114 @@ render_disk_table() {
   done <<EOF
 $data
 EOF
+}
+
+render_network_addresses() {
+  local ip_path="$1"
+
+  if [ ! -f "$ip_path" ]; then
+    emit_tagged_line "WARN" "ip address data not found // $ip_path" 0 0
+    return
+  fi
+
+  local -a lines=()
+  local line
+  while IFS= read -r line || [ -n "$line" ]; do
+    lines+=("$line")
+  done < "$ip_path"
+
+  if [ ${#lines[@]} -eq 0 ]; then
+    emit_tagged_line "INFO" "No network address data available." 0 0
+    return
+  fi
+
+  local header
+  header=$(print_table_row "%-12s %-7s %-38s %-10s %-s" "INTERFACE" "FAMILY" "ADDRESS" "SCOPE" "DETAILS")
+  emit_tagged_line "INFO" "$header" 0 0
+
+  local separator
+  separator=$(print_table_row "%-12s %-7s %-38s %-10s %-s" "------------" "-------" "--------------------------------------" "----------" "------------------------------")
+  emit_tagged_line "INFO" "$separator" 0 0
+
+  local total=${#lines[@]}
+  local idx=0
+  local iface=""
+
+  while [ $idx -lt $total ]; do
+    line="${lines[$idx]}"
+
+    if [ -z "$line" ]; then
+      idx=$((idx + 1))
+      continue
+    fi
+
+    if [[ "$line" =~ ^[0-9]+: ]]; then
+      iface=$(printf "%s" "$line" | sed -E 's/^[0-9]+: *([^: ]+).*/\1/')
+      idx=$((idx + 1))
+      continue
+    fi
+
+    if [[ "$line" =~ ^[[:space:]]+inet ]]; then
+      local trimmed
+      trimmed=$(printf "%s" "$line" | sed 's/^ *//')
+
+      local -a parts=()
+      read -r -a parts <<< "$trimmed"
+      if [ ${#parts[@]} -lt 2 ]; then
+        idx=$((idx + 1))
+        continue
+      fi
+
+      local family="${parts[0]}"
+      local address="${parts[1]}"
+      local scope="-"
+      local -a details_parts=()
+      local j=2
+      while [ $j -lt ${#parts[@]} ]; do
+        local token="${parts[$j]}"
+        if [ "$token" = "scope" ] && [ $((j + 1)) -lt ${#parts[@]} ]; then
+          scope="${parts[$((j + 1))]}"
+          j=$((j + 2))
+          continue
+        fi
+        if [ -n "$iface" ] && [ "$token" = "$iface" ]; then
+          j=$((j + 1))
+          continue
+        fi
+        details_parts+=("$token")
+        j=$((j + 1))
+      done
+
+      local skip_next=0
+      if [ $((idx + 1)) -lt $total ]; then
+        local next_line="${lines[$((idx + 1))]}"
+        if [[ "$next_line" =~ ^[[:space:]]+valid_lft ]]; then
+          local lifetime
+          lifetime=$(printf "%s" "$next_line" | sed 's/^ *//')
+          details_parts+=("$lifetime")
+          skip_next=1
+        fi
+      fi
+
+      local details=""
+      if [ ${#details_parts[@]} -gt 0 ]; then
+        details="${details_parts[*]}"
+      fi
+
+      local row
+      row=$(print_table_row "%-12s %-7s %-38s %-10s %-s" "$iface" "$family" "$address" "$scope" "$details")
+      emit_tagged_line "INFO" "$row" 0 0
+
+      if [ $skip_next -eq 1 ]; then
+        idx=$((idx + 2))
+      else
+        idx=$((idx + 1))
+      fi
+      continue
+    fi
+
+    idx=$((idx + 1))
+  done
 }
 
 render_memory_table() {
@@ -1025,6 +1133,10 @@ log_cmd() {
       render_disk_table "$base_dir/df"
       return
       ;;
+    "cat $base_dir/ip_addr")
+      render_network_addresses "$base_dir/ip_addr"
+      return
+      ;;
     "cat $base_dir/free")
       render_memory_table "$base_dir/free"
       return
@@ -1071,7 +1183,7 @@ log_cmd() {
     if { [ $status -eq 1 ] || [ $status -eq 2 ]; } && [ -z "$trimmed_output" ]; then
       emit_tagged_line "INFO" "No output returned (exit status $status) // $display_command" 0 0
     else
-      emit_tagged_line "ERROR" "command exited with status $status // $display_command" 1 0
+      emit_tagged_line "STATUS" "command exited with status $status // $display_command" 1 0
     fi
   fi
 }
