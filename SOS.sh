@@ -507,12 +507,20 @@ emit_section_heading() {
   fi
 
   local heading="${prefix} ${title} ${suffix}"
+  local formatted_heading="$heading"
+
   if [ "$ENABLE_COLOR" -eq 1 ]; then
-    append_report_line "${color}${heading}${RESET}"
-    printf "%b\n" "${color}${heading}${RESET}"
-  else
-    append_report_line "$heading"
-    printf "%s\n" "$heading"
+    formatted_heading="${color}${heading}${RESET}"
+  fi
+
+  append_report_line "$formatted_heading"
+
+  if [ "$level" != "sub" ]; then
+    if [ "$ENABLE_COLOR" -eq 1 ]; then
+      printf "%b\n" "$formatted_heading"
+    else
+      printf "%s\n" "$formatted_heading"
+    fi
   fi
 }
 
