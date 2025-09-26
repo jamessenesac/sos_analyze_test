@@ -17,6 +17,8 @@ FOREMAN_REPORT="/tmp/$$.log"
 
 ENABLE_COLOR=1
 QUIET_MODE=0
+COMMAND_OUTPUT_INDENT="    "
+COMMAND_OUTPUT_ACTIVE=0
 
 if [ -n "$NO_COLOR" ]; then
   ENABLE_COLOR=0
@@ -251,6 +253,10 @@ emit_tagged_line() {
   local critical="${3:-0}"
   local to_stdout="${4:-0}"
 
+  if [ "$COMMAND_OUTPUT_ACTIVE" -eq 1 ] && [ -n "$COMMAND_OUTPUT_INDENT" ]; then
+    text="${COMMAND_OUTPUT_INDENT}${text}"
+  fi
+
   if tag_is_suppressed "$tag"; then
     return
   fi
@@ -279,6 +285,20 @@ emit_label_line() {
   if [ "$to_stdout" -eq 1 ]; then
     printf "%b\n" "$line"
   fi
+}
+
+emit_command_output_border() {
+  local phase="$1"
+  local border="--------------------------------------------------"
+  local line="$border"
+
+  # keep the phase argument for future adjustments if we ever want to
+  # distinguish between start and end lines again
+  case "$phase" in
+    start|end) line="$border" ;;
+  esac
+
+  emit_tagged_line "" "$line" 0 0
 }
 
 format_plain_line() {
@@ -1169,39 +1189,59 @@ log_cmd() {
 
   emit_tagged_line "$command_tag" "$display_command" 0 0
 
+  local previous_output_state="$COMMAND_OUTPUT_ACTIVE"
+  COMMAND_OUTPUT_ACTIVE=1
+  emit_command_output_border "start"
+
   case "$raw_command" in
     "cat $base_dir/df")
       render_disk_table "$base_dir/df"
+      emit_command_output_border "end"
+      COMMAND_OUTPUT_ACTIVE="$previous_output_state"
       return
       ;;
     "cat $base_dir/ip_addr")
       render_network_addresses "$base_dir/ip_addr"
+      emit_command_output_border "end"
+      COMMAND_OUTPUT_ACTIVE="$previous_output_state"
       return
       ;;
     "cat $base_dir/free")
       render_memory_table "$base_dir/free"
+      emit_command_output_border "end"
+      COMMAND_OUTPUT_ACTIVE="$previous_output_state"
       return
       ;;
     "cat $base_dir/ps | sort -nrk6 | head -n5")
       render_top_memory_consumers "$base_dir/ps"
+      emit_command_output_border "end"
+      COMMAND_OUTPUT_ACTIVE="$previous_output_state"
       return
       ;;
     "cat $base_dir/ps | sort -nr | awk '{print \\\$1, \\\$6}' |"*)
       render_user_memory_totals "$base_dir/ps"
+      emit_command_output_border "end"
+      COMMAND_OUTPUT_ACTIVE="$previous_output_state"
       return
       ;;
     "cat $base_dir/etc/selinux/config")
       process_selinux_config "$base_dir/etc/selinux/config"
+      emit_command_output_border "end"
+      COMMAND_OUTPUT_ACTIVE="$previous_output_state"
       return
       ;;
     "cat $base_dir/sos_commands/rpm/package-data | cut -f1,4 | "*)
       render_third_party_packages "$base_dir/sos_commands/rpm/package-data"
+      emit_command_output_border "end"
+      COMMAND_OUTPUT_ACTIVE="$previous_output_state"
       return
       ;;
   esac
 
   if [[ "$raw_command" == *"var/log/audit/audit.log"* && "$raw_command" == *"denied"* ]]; then
     process_selinux_denials "$base_dir/var/log/audit/audit.log"
+    emit_command_output_border "end"
+    COMMAND_OUTPUT_ACTIVE="$previous_output_state"
     return
   fi
 
@@ -1227,6 +1267,9 @@ log_cmd() {
       emit_tagged_line "STATUS" "command exited with status $status // $display_command" 1 0
     fi
   fi
+
+  emit_command_output_border "end"
+  COMMAND_OUTPUT_ACTIVE="$previous_output_state"
 }
 
 # ref: https://unix.stackexchange.com/questions/44040/a-standard-tool-to-convert-a-byte-count-into-human-kib-mib-etc-like-du-ls1
