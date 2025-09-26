@@ -32,9 +32,13 @@ init_colors() {
     GREEN=""
     YELLOW=""
     RED=""
+    MAGENTA=""
+    WHITE=""
     BRIGHT_RED=""
     BOLD_CYAN=""
     BOLD_BLUE=""
+    BOLD_MAGENTA=""
+    BOLD_WHITE=""
     return
   fi
 
@@ -46,6 +50,8 @@ init_colors() {
     GREEN=$(tput setaf 2)
     YELLOW=$(tput setaf 3)
     RED=$(tput setaf 1)
+    MAGENTA=$(tput setaf 5)
+    WHITE=$(tput setaf 7)
     RESET=$(tput sgr0)
   else
     BOLD=""
@@ -55,12 +61,16 @@ init_colors() {
     GREEN=""
     YELLOW=""
     RED=""
+    MAGENTA=""
+    WHITE=""
     RESET=""
   fi
 
   BRIGHT_RED="${BOLD}${RED}"
   BOLD_CYAN="${BOLD}${CYAN}"
   BOLD_BLUE="${BOLD}${BLUE}"
+  BOLD_MAGENTA="${BOLD}${MAGENTA}"
+  BOLD_WHITE="${BOLD}${WHITE}"
 }
 
 color_for_tag() {
@@ -76,6 +86,7 @@ color_for_tag() {
     DENIED) printf "%s" "$BRIGHT_RED" ;;
     WARN) printf "%s" "$YELLOW" ;;
     OK) printf "%s" "$GREEN" ;;
+    STATUS) printf "%s" "$BOLD_WHITE" ;;
     INFO) printf "%s" "${DIM}${BLUE}" ;;
     QUERY) printf "%s" "$CYAN" ;;
     *) printf "" ;;
@@ -136,11 +147,6 @@ classify_text_line() {
 
   if [ -z "$text" ]; then
     printf ":0"
-    return
-  fi
-
-  if [[ "$text" =~ ^[[:space:]]*File\  ]]; then
-    printf "ERROR:1"
     return
   fi
 
@@ -426,7 +432,10 @@ is_command_reference() {
 emit_section_heading() {
   local title="$1"
   local level="$2"
-  local color="$BOLD_CYAN"
+  local color="$BOLD_MAGENTA"
+  if [ -z "$color" ]; then
+    color="$BOLD_CYAN"
+  fi
   local prefix="==="
   local suffix="==="
 
@@ -460,18 +469,21 @@ emit_selinux_status() {
     return
   fi
 
-  local normalized=$(printf "%s" "$status" | tr '[:upper:]' '[:lower:]')
-  case "$normalized" in
-    enforcing)
-      emit_tagged_line "OK" "SELINUX STATUS: Enforcing" 0 0
-      ;;
-    permissive)
-      emit_tagged_line "WARN" "SELINUX STATUS: Permissive" 0 0
-      ;;
-    disabled)
-      emit_tagged_line "ERROR" "SELINUX STATUS: Disabled" 1 0
-      ;;
-  esac
+  local normalized
+  normalized=$(printf "%s" "$status" | tr '[:upper:]' '[:lower:]')
+  local display
+  display=$(printf "%s" "$status" | tr '[:lower:]' '[:upper:]')
+
+  local message="SELINUX STATUS: $display"
+  if [ "$ENABLE_COLOR" -eq 1 ] && [ -n "$BOLD_WHITE" ]; then
+    message="SELINUX STATUS: ${BOLD_WHITE}${display}${RESET}"
+  fi
+
+  emit_tagged_line "STATUS" "$message" 0 0
+
+  if [ "$normalized" = "disabled" ]; then
+    emit_tagged_line "WARN" "SELinux is disabled at runtime" 1 0
+  fi
 }
 
 highlight_permissive_flag() {
@@ -500,6 +512,38 @@ highlight_denied_keyword() {
   printf "%s" "$(printf "%s" "$text" | sed -E "s|(denied)|${BRIGHT_RED}\\1${RESET}|Ig")"
 }
 
+highlight_selinux_setting() {
+  local line="$1"
+
+  if [ "$ENABLE_COLOR" -eq 0 ]; then
+    printf "%s" "$line"
+    return
+  fi
+
+  local pattern=""
+
+  if [[ "$line" =~ ^SELINUX= ]]; then
+    pattern='(SELINUX=)([^[:space:]#]+)'
+  elif [[ "$line" =~ ^SELINUXTYPE= ]]; then
+    pattern='(SELINUXTYPE=)([^[:space:]#]+)'
+  else
+    printf "%s" "$line"
+    return
+  fi
+
+  if [ -z "$BOLD_WHITE" ]; then
+    printf "%s" "$line"
+    return
+  fi
+
+  local escaped_color
+  escaped_color=$(printf '%s' "$BOLD_WHITE" | sed -e 's/[&/\\]/\\&/g')
+  local escaped_reset
+  escaped_reset=$(printf '%s' "$RESET" | sed -e 's/[&/\\]/\\&/g')
+
+  printf "%s" "$(printf "%s" "$line" | sed -E "s/${pattern}/\\1${escaped_color}\\2${escaped_reset}/")"
+}
+
 process_selinux_config() {
   local config_path="$1"
 
@@ -512,22 +556,16 @@ process_selinux_config() {
     if [[ "$line" =~ ^SELINUX= ]]; then
       local value=${line#SELINUX=}
       local lower=$(printf "%s" "$value" | tr '[:upper:]' '[:lower:]')
-      case "$lower" in
-        enforcing)
-          emit_tagged_line "OK" "$line" 0 0
-          ;;
-        permissive)
-          emit_tagged_line "WARN" "$line" 0 0
-          ;;
-        disabled)
-          emit_tagged_line "ERROR" "$line" 1 0
-          ;;
-        *)
-          emit_tagged_line "INFO" "$line" 0 0
-          ;;
-      esac
+      local decorated
+      decorated=$(highlight_selinux_setting "$line")
+      emit_tagged_line "STATUS" "$decorated" 0 0
+      if [ "$lower" = "disabled" ]; then
+        emit_tagged_line "WARN" "SELinux is disabled in the configuration" 1 0
+      fi
     elif [[ "$line" =~ ^SELINUXTYPE= ]]; then
-      emit_tagged_line "INFO" "$line" 0 0
+      local decorated
+      decorated=$(highlight_selinux_setting "$line")
+      emit_tagged_line "STATUS" "$decorated" 0 0
     else
       emit_tagged_line "INFO" "$line" 0 0
     fi
@@ -819,6 +857,51 @@ render_user_memory_totals() {
   emit_tagged_line "" "$total_row" 0 0
 }
 
+render_third_party_packages() {
+  local package_data="$1"
+
+  if [ ! -f "$package_data" ]; then
+    emit_tagged_line "INFO" "No third-party package data found // $package_data" 0 0
+    return
+  fi
+
+  local data
+  data=$(awk -F'\t' '
+    NR>1 {
+      pkg=$1
+      vendor=$4
+      gsub(/^ +| +$/, "", pkg)
+      gsub(/^ +| +$/, "", vendor)
+      if (vendor ~ /Red Hat/) next
+      if (pkg ~ /^katello-ca-consumer-/) next
+      if (vendor == "") vendor="(none)"
+      print pkg "\t" vendor
+    }
+  ' "$package_data" | LC_ALL=C sort -t$'\t' -k2,2 -k1,1)
+
+  if [ -z "$data" ]; then
+    emit_tagged_line "INFO" "No third-party packages were detected." 0 0
+    return
+  fi
+
+  local header
+  header=$(print_table_row "%-45s %-35s" "PACKAGE" "VENDOR")
+  emit_tagged_line "INFO" "$header" 0 0
+
+  local separator
+  separator=$(print_table_row "%-45s %-35s" "---------------------------------------------" "-----------------------------------")
+  emit_tagged_line "INFO" "$separator" 0 0
+
+  while IFS=$'\t' read -r package vendor || [ -n "$package" ]; do
+    if [ -z "$package" ]; then
+      continue
+    fi
+    local row
+    row=$(print_table_row "%-45s %-35s" "$package" "$vendor")
+    emit_tagged_line "INFO" "$row" 0 0
+  done <<< "$data"
+}
+
 emit_memory_usage_summary() {
   local total_kib="$1"
 
@@ -958,6 +1041,10 @@ log_cmd() {
       process_selinux_config "$base_dir/etc/selinux/config"
       return
       ;;
+    "cat $base_dir/sos_commands/rpm/package-data | cut -f1,4 | "*)
+      render_third_party_packages "$base_dir/sos_commands/rpm/package-data"
+      return
+      ;;
   esac
 
   if [[ "$raw_command" == *"var/log/audit/audit.log"* && "$raw_command" == *"denied"* ]]; then
@@ -979,7 +1066,13 @@ log_cmd() {
   done <<< "$cmd_output"
 
   if [ $status -ne 0 ]; then
-    emit_tagged_line "ERROR" "command exited with status $status // $display_command" 1 0
+    local trimmed_output
+    trimmed_output=$(printf "%s" "$cmd_output" | tr -d '[:space:]')
+    if { [ $status -eq 1 ] || [ $status -eq 2 ]; } && [ -z "$trimmed_output" ]; then
+      emit_tagged_line "INFO" "No output returned (exit status $status) // $display_command" 0 0
+    else
+      emit_tagged_line "ERROR" "command exited with status $status // $display_command" 1 0
+    fi
   fi
 }
 
