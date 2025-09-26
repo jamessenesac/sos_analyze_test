@@ -86,7 +86,7 @@ color_for_tag() {
     DENIED) printf "%s" "$BRIGHT_RED" ;;
     WARN) printf "%s" "$YELLOW" ;;
     OK) printf "%s" "$GREEN" ;;
-    STATUS) printf "%s" "$BOLD_WHITE" ;;
+    STATUS) printf "" ;;
     INFO) printf "%s" "${DIM}${BLUE}" ;;
     QUERY) printf "%s" "$CYAN" ;;
     *) printf "" ;;
